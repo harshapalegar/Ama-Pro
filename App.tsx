@@ -4,21 +4,29 @@ import { Product, ViewState, DashboardTab, LPResult, ScoreResult } from './types
 import { Header } from './components/Header';
 import { ProductCard } from './components/ProductCard';
 import { ProductPage } from './components/ProductPage';
+import { CSVUploadModal } from './components/CSVUploadModal';
+import { CategoryManager } from './components/CategoryManager';
 import { LPAlgorithm, scoreBasedRanking } from './services/algorithmService';
-import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
+import { useProducts } from './hooks/useProducts';
+import { useAlgorithmConfig } from './hooks/useAlgorithmConfig';
+import { csvService } from './services/csvService';
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
-import { 
-  Info, Settings, LayoutDashboard, BarChart2, Database, AlertCircle, 
-  Upload, RotateCcw, Search as SearchIcon, ChevronRight, Menu, 
-  ChevronDown, Download, ExternalLink, MoreHorizontal, Folder, FileText
+import {
+  Info, Settings, LayoutDashboard, BarChart2, Database, AlertCircle,
+  Upload, RotateCcw, Search as SearchIcon, ChevronRight, Menu,
+  ChevronDown, Download, ExternalLink, MoreHorizontal, Folder, FileText,
+  Zap, Tag, RefreshCw
 } from 'lucide-react';
 
 export default function App() {
-  // State
+  // Core State
+  const { products, loading: productsLoading, addProducts, removeAllProducts } = useProducts();
+  const { activeConfig, configs, updateConfig, setActive } = useAlgorithmConfig();
+
   const [view, setView] = useState<ViewState>('home');
   const [previousView, setPreviousView] = useState<ViewState>('home');
-  const [products, setProducts] = useState<Product[]>(INITIAL_PRODUCTS);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [searchResults, setSearchResults] = useState<{
@@ -29,26 +37,42 @@ export default function App() {
 
   // Dashboard State
   const [activeTab, setActiveTab] = useState<DashboardTab>('products');
+  const [showCSVModal, setShowCSVModal] = useState(false);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
+  const [uploading, setUploading] = useState(false);
+
+  // Algorithm Parameters - synced with active config
   const [algoParams, setAlgoParams] = useState({
     lambda: 0.90,
     slots: 10,
     scoreWeight: 1.0,
     selectedQuery: 'cable'
   });
-  
+
   const [lpResults, setLpResults] = useState<LPResult | null>(null);
   const [scoreResults, setScoreResults] = useState<ScoreResult | null>(null);
   const [liveAlgorithmData, setLiveAlgorithmData] = useState<Product[]>([]);
   const [productFilter, setProductFilter] = useState('');
 
+  // Sync active config to algo params
+  useEffect(() => {
+    if (activeConfig) {
+      setAlgoParams({
+        lambda: activeConfig.lambda,
+        slots: activeConfig.slots,
+        scoreWeight: activeConfig.score_weight,
+        selectedQuery: activeConfig.selected_query
+      });
+    }
+  }, [activeConfig]);
+
   // Handlers
   const handleSearch = (query: string) => {
     if (!query) return;
     const lowerQ = query.toLowerCase();
-    
-    // Filter logic
-    const matched = products.filter(p => 
-      p.keywords.some(k => k.includes(lowerQ)) || 
+
+    const matched = products.filter(p =>
+      p.keywords.some(k => k.includes(lowerQ)) ||
       p.category.toLowerCase().includes(lowerQ) ||
       p.name.toLowerCase().includes(lowerQ) ||
       p.description.toLowerCase().includes(lowerQ)
@@ -57,12 +81,10 @@ export default function App() {
     const organic = matched;
     let sponsored = matched.filter(p => p.isSponsored);
 
-    // If we have live algorithm data applicable to this query
     if (liveAlgorithmData.length > 0 && liveAlgorithmData[0].keywords.some(k => k.includes(lowerQ))) {
        sponsored = liveAlgorithmData;
        setSearchResults({ sponsored, organic, sponsoredSource: 'algorithm' });
     } else {
-       // Default Sort by relevance
        sponsored = sponsored.sort((a, b) => b.relevance - a.relevance).slice(0, 10);
        setSearchResults({ sponsored, organic, sponsoredSource: 'default' });
     }
@@ -79,61 +101,20 @@ export default function App() {
       window.scrollTo(0, 0);
   };
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const content = e.target?.result as string;
-        const data = JSON.parse(content);
-
-        if (!Array.isArray(data)) {
-          alert('Invalid data format. Expected a JSON array of products.');
-          return;
-        }
-        
-        // Basic validation/sanitization and calculation of expectedRevenue if missing
-        const validProducts: Product[] = data.map((item: any, index: number) => ({
-             id: item.id || (Date.now() + index).toString(),
-             name: item.name || "Unknown Product",
-             price: Number(item.price) || 0,
-             actualPrice: Number(item.actualPrice) || Number(item.price) * 1.2,
-             discountPercentage: Number(item.discountPercentage) || 0,
-             category: item.category || "General",
-             description: item.description || "",
-             image: item.image || "",
-             keywords: Array.isArray(item.keywords) ? item.keywords : [],
-             relevance: Number(item.relevance) || 0,
-             takeRate: Number(item.takeRate) || 0,
-             adRate: Number(item.adRate) || 0,
-             isSponsored: Boolean(item.isSponsored),
-             rating: Number(item.rating) || 0,
-             reviews: Number(item.reviews) || 0,
-             icon: item.icon || "📦",
-             expectedRevenue: item.expectedRevenue || (Number(item.relevance) * Number(item.price) * (Number(item.takeRate) + Number(item.adRate)))
-        }));
-
-        setProducts(validProducts);
-        // Clear previous algorithm results as data changed
-        setLpResults(null);
-        setScoreResults(null);
-        setLiveAlgorithmData([]);
-        
-        alert(`Successfully imported ${validProducts.length} products.`);
-      } catch (err) {
-        console.error(err);
-        alert('Failed to parse JSON file.');
-      }
-    };
-    reader.readAsText(file);
-    // Reset input value to allow re-uploading same file if needed
-    event.target.value = ''; 
+  const handleCSVUpload = async (importedProducts: Product[]) => {
+    setUploading(true);
+    try {
+      await addProducts(importedProducts);
+      alert(`Successfully imported ${importedProducts.length} products!`);
+    } catch (err) {
+      alert(`Upload failed: ${String(err)}`);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const runLP = () => {
-    const matched = products.filter(p => 
+    const matched = products.filter(p =>
       p.keywords.some(k => k.includes(algoParams.selectedQuery)) && p.isSponsored
     );
 
@@ -155,7 +136,7 @@ export default function App() {
   };
 
   const runComparison = () => {
-    const matched = products.filter(p => 
+    const matched = products.filter(p =>
         p.keywords.some(k => k.includes(algoParams.selectedQuery)) && p.isSponsored
     );
 
@@ -173,13 +154,38 @@ export default function App() {
     setActiveTab('comparison');
   };
 
-  // Helper for AWS Style Buttons
-  const AwsButton = ({ children, primary, onClick, icon: Icon }: any) => (
-    <button 
+  const handleParamChange = async (updates: Partial<typeof algoParams>) => {
+    const newParams = { ...algoParams, ...updates };
+    setAlgoParams(newParams);
+
+    if (activeConfig) {
+      await updateConfig(activeConfig.id, {
+        lambda: newParams.lambda,
+        slots: newParams.slots,
+        score_weight: newParams.scoreWeight,
+        selected_query: newParams.selectedQuery,
+      });
+    }
+  };
+
+  const downloadDataset = () => {
+    const csv = csvService.generateCSVFromProducts(products);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `products-${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+  };
+
+  // AWS Style Button Component
+  const AwsButton = ({ children, primary, onClick, icon: Icon, disabled }: any) => (
+    <button
         onClick={onClick}
-        className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border rounded shadow-sm focus:ring-2 focus:ring-offset-1 focus:ring-orange-500 outline-none
-            ${primary 
-                ? 'bg-[#ec7211] hover:bg-[#eb5f07] text-white border-transparent' 
+        disabled={disabled}
+        className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border rounded shadow-sm focus:ring-2 focus:ring-offset-1 focus:ring-orange-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed
+            ${primary
+                ? 'bg-[#ec7211] hover:bg-[#eb5f07] text-white border-transparent'
                 : 'bg-white hover:bg-gray-50 text-[#16191f] border-gray-300'}`}
     >
         {Icon && <Icon size={14} />}
@@ -190,7 +196,6 @@ export default function App() {
   // Render Functions
   const renderHome = () => (
     <div className="bg-[#eaeded] min-h-screen pb-10">
-      {/* Hero Banner Section */}
       <div className="relative w-full h-[250px] md:h-[300px] lg:h-[350px] bg-gray-800 overflow-hidden cursor-pointer group">
          <div className="absolute inset-0 bg-gradient-to-r from-[#232f3e] to-[#37475a] flex items-center justify-center">
             <div className="text-center text-white px-4 transform transition-transform duration-500 group-hover:scale-105">
@@ -272,11 +277,11 @@ export default function App() {
       <div className="max-w-[1500px] mx-auto px-4 space-y-6">
          <div className="bg-white p-5 shadow-sm">
             <div className="flex items-center gap-4 mb-4">
-                <h3 className="text-xl font-bold text-[#0F1111]">Today's Deals</h3>
+                <h3 className="text-xl font-bold text-[#0F1111]">Today's Deals ({products.length})</h3>
                 <a href="#" className="text-sm text-[#007185] hover:text-[#C7511F] hover:underline">See all deals</a>
             </div>
             <div className="flex overflow-x-auto gap-4 pb-4 custom-scrollbar">
-               {products.map(p => (
+               {products.slice(0, 10).map(p => (
                    <div key={p.id} onClick={() => handleProductClick(p)} className="min-w-[200px] max-w-[200px] flex-shrink-0 cursor-pointer p-2 border border-transparent hover:border-gray-200 rounded">
                        <div className="bg-gray-100 h-40 flex items-center justify-center text-6xl mb-2 rounded p-4">
                             {p.image ? <img src={p.image} className="max-h-full max-w-full mix-blend-multiply" /> : p.icon}
@@ -378,7 +383,7 @@ export default function App() {
 
   const renderDashboard = () => (
     <div className="flex h-[calc(100vh-60px)] bg-gray-100 text-[#16191f]">
-      {/* Sidebar - AWS Console Style */}
+      {/* Sidebar */}
       <div className="w-[240px] bg-white border-r border-gray-300 hidden md:flex flex-col">
         <div className="p-4">
            <div className="text-base font-bold text-[#16191f] mb-4 px-2">ShopHub Optimization</div>
@@ -394,7 +399,7 @@ export default function App() {
              </div>
            </div>
         </div>
-        
+
         <div className="mt-4 border-t border-gray-200 pt-4 px-4">
             <div className="flex items-center justify-between text-[#545b64] font-bold text-xs uppercase tracking-wider mb-2">
                 Storage Lens
@@ -413,7 +418,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        
+
         {/* Breadcrumb & Title Header */}
         <div className="px-6 pt-6 pb-2">
             <div className="flex items-center gap-1 text-xs text-[#545b64] mb-2">
@@ -425,7 +430,7 @@ export default function App() {
             </div>
             <div className="flex items-center gap-3">
                  <h1 className="text-2xl font-bold text-[#16191f]">prod-ranking-algo-v1</h1>
-                 <span className="bg-green-100 text-green-800 text-xs font-bold px-2 py-0.5 rounded border border-green-200">Info</span>
+                 <span className="bg-green-100 text-green-800 text-xs font-bold px-2 py-0.5 rounded border border-green-200">Live</span>
             </div>
         </div>
 
@@ -433,17 +438,17 @@ export default function App() {
         <div className="px-6 border-b border-gray-300">
              <div className="flex gap-8">
                 {[
-                    { id: 'products', label: 'Objects' }, 
-                    { id: 'algorithm', label: 'Properties' }, 
-                    { id: 'results', label: 'Metrics' }, 
-                    { id: 'comparison', label: 'Permissions' }, 
+                    { id: 'products', label: 'Objects' },
+                    { id: 'algorithm', label: 'Properties' },
+                    { id: 'results', label: 'Metrics' },
+                    { id: 'comparison', label: 'Analysis' },
                 ].map(tab => (
                     <button
                         key={tab.id}
                         onClick={() => setActiveTab(tab.id as DashboardTab)}
                         className={`pb-2 pt-1 text-sm font-medium border-b-2 transition-colors
-                            ${activeTab === tab.id 
-                                ? 'border-[#ec7211] text-[#16191f] font-bold' 
+                            ${activeTab === tab.id
+                                ? 'border-[#ec7211] text-[#16191f] font-bold'
                                 : 'border-transparent text-[#545b64] hover:text-[#16191f] hover:border-gray-300'}`}
                     >
                         {tab.label}
@@ -454,53 +459,45 @@ export default function App() {
 
         {/* Content Panel */}
         <div className="flex-1 overflow-y-auto p-6 bg-[#f2f3f3]">
-             
-             {/* PRODUCTS TAB (Objects) */}
+
+             {/* PRODUCTS TAB */}
              {activeTab === 'products' && (
                  <div className="bg-white border border-gray-300 shadow-sm">
                      <div className="p-4 border-b border-gray-200">
                          <h2 className="text-lg font-bold text-[#16191f]">Products ({products.length})</h2>
                          <p className="text-sm text-[#545b64] mt-1">
-                            Objects are the fundamental entities stored in ShopHub. You can use <a href="#" className="text-[#0073bb] hover:underline">Inventory</a> to get a list of all objects.
+                            Manage product inventory, upload datasets, and organize by categories.
                          </p>
                      </div>
 
                      {/* Toolbar */}
                      <div className="p-4 flex flex-col gap-4">
                          <div className="flex flex-wrap items-center justify-between gap-2">
-                             <div className="flex items-center gap-2">
-                                <AwsButton icon={RotateCcw}>Refresh</AwsButton>
-                                <AwsButton>Copy ID</AwsButton>
-                                <AwsButton>Copy URL</AwsButton>
-                                <AwsButton icon={Download}>Download</AwsButton>
-                                <AwsButton>Open</AwsButton>
-                                <label className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border rounded shadow-sm hover:bg-gray-50 text-[#16191f] border-gray-300 cursor-pointer">
-                                    <Upload size={14} /> Upload
-                                    <input type="file" accept=".json" onChange={handleFileUpload} className="hidden" />
-                                </label>
+                             <div className="flex items-center gap-2 flex-wrap">
+                                <AwsButton icon={RefreshCw} onClick={() => window.location.reload()}>Refresh</AwsButton>
+                                <AwsButton icon={Download} onClick={downloadDataset}>Export CSV</AwsButton>
+                                <AwsButton icon={Tag} onClick={() => setShowCategoryModal(true)}>Categories</AwsButton>
+                                <button onClick={() => setShowCSVModal(true)} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border rounded shadow-sm hover:bg-gray-50 text-[#16191f] border-gray-300 cursor-pointer">
+                                    <Upload size={14} /> Import CSV
+                                </button>
                                 <div className="h-6 w-px bg-gray-300 mx-1"></div>
-                                <AwsButton 
+                                <AwsButton
                                     onClick={() => {
                                         if(confirm('Reset to default dataset?')) {
-                                            setProducts(INITIAL_PRODUCTS);
-                                            setLpResults(null);
-                                            setScoreResults(null);
-                                            setLiveAlgorithmData([]);
+                                            removeAllProducts();
+                                            addProducts(INITIAL_PRODUCTS);
                                         }
                                     }}
                                 >Reset Data</AwsButton>
                              </div>
-                             <div className="flex items-center gap-2">
-                                 <AwsButton primary>Create folder</AwsButton>
-                             </div>
                          </div>
-                         
+
                          {/* Search Bar */}
                          <div className="relative">
                             <SearchIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 text-[#545b64]" size={16} />
-                            <input 
-                                type="text" 
-                                placeholder="Find products by name" 
+                            <input
+                                type="text"
+                                placeholder="Find products by name"
                                 className="w-full pl-9 pr-4 py-1.5 border border-[#879596] rounded text-sm focus:outline-none focus:border-[#0073bb] focus:ring-1 focus:ring-[#0073bb]"
                                 value={productFilter}
                                 onChange={(e) => setProductFilter(e.target.value)}
@@ -541,7 +538,7 @@ export default function App() {
                                         <td className="px-4 py-3 text-[#16191f] font-mono">${p.price.toFixed(2)}</td>
                                         <td className="px-4 py-3 text-[#545b64]">{p.relevance.toFixed(2)}</td>
                                         <td className="px-4 py-3 text-[#545b64]">
-                                            {p.isSponsored ? '-' : 'Standard'}
+                                            {p.isSponsored ? 'Sponsored' : 'Standard'}
                                         </td>
                                     </tr>
                                 ))}
@@ -551,37 +548,39 @@ export default function App() {
                  </div>
              )}
 
-             {/* ALGORITHM TAB (Properties) */}
+             {/* ALGORITHM TAB */}
              {activeTab === 'algorithm' && (
                  <div className="space-y-6 max-w-4xl">
-                    {/* Panel 1: Configuration */}
                     <div className="bg-white border border-gray-300 shadow-sm">
                         <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
                             <h2 className="text-lg font-bold text-[#16191f]">Algorithm Configuration</h2>
-                            <AwsButton>Edit</AwsButton>
                         </div>
                         <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-y-6 gap-x-12">
                             <div>
                                 <div className="text-xs font-bold text-[#545b64] mb-1">Target Query Context</div>
-                                <select 
+                                <select
                                     className="w-full p-1.5 text-sm border border-[#879596] rounded bg-white shadow-sm focus:border-[#ec7211] focus:ring-1 focus:ring-[#ec7211] outline-none"
                                     value={algoParams.selectedQuery}
-                                    onChange={(e) => setAlgoParams({...algoParams, selectedQuery: e.target.value})}
+                                    onChange={(e) => handleParamChange({ selectedQuery: e.target.value })}
                                 >
                                     <option value="cable">Cable</option>
                                     <option value="iphone">iPhone</option>
                                     <option value="headphones">Headphones</option>
                                     <option value="mouse">Mouse</option>
                                     <option value="laptop">Laptop</option>
+                                    <option value="tv">TV</option>
+                                    <option value="watch">Watch</option>
                                 </select>
                             </div>
                             <div>
-                                <div className="text-xs font-bold text-[#545b64] mb-1">Relevance Threshold (λ)</div>
+                                <div className="text-xs font-bold text-[#545b64] mb-1 flex items-center gap-1">
+                                    <Zap size={12} /> Relevance Threshold (λ)
+                                </div>
                                 <div className="flex items-center gap-4">
-                                    <input 
+                                    <input
                                         type="range" min="0.70" max="1.00" step="0.05"
                                         value={algoParams.lambda}
-                                        onChange={(e) => setAlgoParams({...algoParams, lambda: parseFloat(e.target.value)})}
+                                        onChange={(e) => handleParamChange({ lambda: parseFloat(e.target.value) })}
                                         className="flex-1 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#ec7211]"
                                     />
                                     <span className="text-sm font-mono">{algoParams.lambda.toFixed(2)}</span>
@@ -590,10 +589,10 @@ export default function App() {
                             <div>
                                 <div className="text-xs font-bold text-[#545b64] mb-1">Sponsored Slots</div>
                                 <div className="flex items-center gap-4">
-                                    <input 
+                                    <input
                                         type="range" min="5" max="15" step="1"
                                         value={algoParams.slots}
-                                        onChange={(e) => setAlgoParams({...algoParams, slots: parseInt(e.target.value)})}
+                                        onChange={(e) => handleParamChange({ slots: parseInt(e.target.value) })}
                                         className="flex-1 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#ec7211]"
                                     />
                                     <span className="text-sm font-mono">{algoParams.slots}</span>
@@ -602,10 +601,10 @@ export default function App() {
                              <div>
                                 <div className="text-xs font-bold text-[#545b64] mb-1">Score Weight (w)</div>
                                 <div className="flex items-center gap-4">
-                                    <input 
+                                    <input
                                         type="range" min="0.5" max="3.0" step="0.1"
                                         value={algoParams.scoreWeight}
-                                        onChange={(e) => setAlgoParams({...algoParams, scoreWeight: parseFloat(e.target.value)})}
+                                        onChange={(e) => handleParamChange({ scoreWeight: parseFloat(e.target.value) })}
                                         className="flex-1 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#ec7211]"
                                     />
                                     <span className="text-sm font-mono">{algoParams.scoreWeight.toFixed(1)}</span>
@@ -614,26 +613,25 @@ export default function App() {
                         </div>
                     </div>
 
-                    {/* Panel 2: Actions */}
-                     <div className="bg-white border border-gray-300 shadow-sm">
+                    <div className="bg-white border border-gray-300 shadow-sm">
                         <div className="px-6 py-4 border-b border-gray-200">
                             <h2 className="text-lg font-bold text-[#16191f]">Execution Control</h2>
                         </div>
                         <div className="p-6">
                             <p className="text-sm text-[#545b64] mb-4">
-                                Run the Linear Programming algorithm to generate an optimal ranking based on the current configuration. You can then apply these results to the live site.
+                                Run the Linear Programming algorithm to generate an optimal ranking based on the current configuration. Changes apply instantly.
                             </p>
-                            <div className="flex gap-4">
+                            <div className="flex gap-4 flex-wrap">
                                 <AwsButton primary onClick={runLP}>Run Optimization</AwsButton>
                                 <AwsButton onClick={applyToSite}>Apply to Production</AwsButton>
                                 <AwsButton onClick={runComparison}>Run A/B Comparison</AwsButton>
                             </div>
                         </div>
-                     </div>
+                    </div>
                  </div>
              )}
 
-             {/* RESULTS TAB (Metrics) */}
+             {/* RESULTS TAB */}
              {activeTab === 'results' && (
                  <div className="space-y-6">
                     {!lpResults ? (
@@ -669,7 +667,7 @@ export default function App() {
                                    <BarChart data={lpResults.items.map((item, i) => ({
                                        name: `Slot ${i+1}`,
                                        revenue: item.expectedRevenue,
-                                       relevance: item.relevance * 10 
+                                       relevance: item.relevance * 10
                                    }))}>
                                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
                                        <XAxis dataKey="name" fontSize={12} tickLine={false} axisLine={false} />
@@ -686,7 +684,7 @@ export default function App() {
                  </div>
              )}
 
-             {/* COMPARISON TAB (Permissions/Analysis) */}
+             {/* COMPARISON TAB */}
              {activeTab === 'comparison' && (
                  <div className="space-y-6">
                     {(!lpResults || !scoreResults) ? (
@@ -701,7 +699,7 @@ export default function App() {
                                 <h2 className="text-lg font-bold text-[#16191f]">Algorithm Performance Analysis</h2>
                             </div>
                              <div className="p-6">
-                                <div className="flex items-center gap-12 mb-8">
+                                <div className="flex items-center gap-12 mb-8 flex-wrap">
                                     <div>
                                         <div className="text-sm text-[#545b64] mb-1">Standard Score Model</div>
                                         <div className="text-3xl font-bold text-[#16191f] border-l-4 border-red-600 pl-3">
@@ -721,7 +719,7 @@ export default function App() {
                                         </div>
                                     </div>
                                 </div>
-                                
+
                                 <div className="h-80 w-full">
                                     <ResponsiveContainer width="100%" height="100%">
                                         <BarChart layout="vertical" data={[
@@ -762,7 +760,20 @@ export default function App() {
             </div>
         )}
       </main>
-      
+
+      {/* CSV Upload Modal */}
+      <CSVUploadModal
+        isOpen={showCSVModal}
+        onClose={() => setShowCSVModal(false)}
+        onUpload={handleCSVUpload}
+      />
+
+      {/* Category Manager Modal */}
+      <CategoryManager
+        isOpen={showCategoryModal}
+        onClose={() => setShowCategoryModal(false)}
+      />
+
       {view !== 'dashboard' && view !== 'product' && (
         <footer className="bg-[#131921] text-white py-8 mt-auto">
             <div className="max-w-[1000px] mx-auto text-center">
